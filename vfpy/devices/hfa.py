@@ -46,9 +46,16 @@ def from_dicom(filepath, resolution=600):
     return ret
 
 
-def from_pdf(filepath, resolution=600):
-    # TODO Test
-    wandimage = imageutils.bytearray_to_wandimage(filepath, resolution=resolution)
+def from_pdf(filepath, resolution=600, page=0):
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext in ['.tif', '.tiff']:
+        opencvimage = cv2.imread(filepath, cv2.IMREAD_GRAYSCALE)
+        if opencvimage is None:
+            raise ValueError('Could not read TIFF image: {}'.format(filepath))
+        return HFAScan(opencvimage)
+
+    # For multipage documents, explicitly select one page.
+    wandimage = imageutils.pdf_to_wandimage('{}[{}]'.format(filepath, page), resolution=resolution)
     opencvimage = imageutils.wandimage_to_opencvimage(wandimage)
 
     ret = HFAScan(opencvimage)
@@ -60,18 +67,26 @@ def from_pdf(filepath, resolution=600):
 
 
 def unstring_maps(stringmap, setbelow0to=-99):
-    ret = np.full(stringmap.shape, np.NaN).ravel()
+    ret = np.full(stringmap.shape, np.nan).ravel()
     for num, item in enumerate(stringmap.ravel()):
         if item == '':
-            ret[num] = np.NaN
+            ret[num] = np.nan
         elif item == '<0':
             ret[num] = setbelow0to
         else:
             try:
-                ret[num] = np.float(item)
+                ret[num] = float(item)
             except ValueError:
-                ret[num] = np.NaN
+                ret[num] = np.nan
     return ret.reshape(stringmap.shape).astype(np.float64)
+
+
+def _display_debug_image(window_name, image, show_process):
+    if not show_process:
+        return
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.imshow(window_name, image.astype(np.uint8))
+    cv2.waitKey(1)
 
 
 def get_transitions(img, axis, only_white_to_black=False):
@@ -182,10 +197,17 @@ class HFAScan(StaticPerimetry):
         self.isProcessed = False
 
     def guess_protocol(self):
+        # Fast pass on upper-left region, then full image fallback for redacted/atypical layouts.
         stringblob = pyt.image_to_string(self.Image[:int(self.Image.shape[0] / 2), :int(self.Image.shape[1] / 2)])
-        treshtest = re.search(r'\d{2}-\d Threshold Test', stringblob, flags=re.IGNORECASE)
+        treshtest = re.search(r'\b(10-2|24-2|30-2|60-4)\b', stringblob, flags=re.IGNORECASE)
         if treshtest:
-            self.Protocol = treshtest.group().split(' ')[0]
+            self.Protocol = treshtest.group().upper()
+            return
+
+        stringblob = pyt.image_to_string(self.Image)
+        treshtest = re.search(r'\b(10-2|24-2|30-2|60-4)\b', stringblob, flags=re.IGNORECASE)
+        if treshtest:
+            self.Protocol = treshtest.group().upper()
 
     def identify_landmarks(self, show_process=True):
         if self.Protocol is None:
@@ -197,22 +219,24 @@ class HFAScan(StaticPerimetry):
         else:
             print('The analysis protocol (30-2, 60-4, etc.) should be known for landmark identification')
 
-    def obtain_gridocrois(self):
+    def obtain_gridocrois(self, show_process=False):
         if self.Landmarks is None:
-            self.identify_landmarks()
+            self.identify_landmarks(show_process=show_process)
 
         if self.Protocol == '60-4':
             # TODO think about shifting left or right
-            self.DefectDepthRois.extend(hfa_60_4_get_gridocrois(self.Image, self.Landmarks.Cross2, 'DDRoi'))
-            self.ThresholdRois.extend(hfa_60_4_get_gridocrois(self.Image, self.Landmarks.Cross3, 'ThRoi'))
+            self.DefectDepthRois.extend(
+                hfa_60_4_get_gridocrois(self.Image, self.Landmarks.Cross2, 'DDRoi', show_process=show_process)
+            )
+            self.ThresholdRois.extend(
+                hfa_60_4_get_gridocrois(self.Image, self.Landmarks.Cross3, 'ThRoi', show_process=show_process)
+            )
         else:
             print('The analysis protocol (30-2, 60-4, etc.) should be known for landmark identification')
 
-    def read_scanparameters(self):
+    def read_scanparameters(self, show_process=False):
         if not self.Landmarks:
-            self.identify_landmarks()
-
-        cv2.namedWindow('OCR Input')
+            self.identify_landmarks(show_process=show_process)
         #################
         # Above top bar #
         #################
@@ -237,8 +261,7 @@ class HFAScan(StaticPerimetry):
         ocr_im = crop[:, :maxcoltrans_left[1]]
         ocr_im = crop_to_bounding_box(ocr_im)
         ocr_im = add_boarder(ocr_im)
-        cv2.imshow('OCR Input', ocr_im.astype(np.uint8))
-        cv2.waitKey(1)
+        _display_debug_image('OCR Input', ocr_im, show_process)
 
         txt = pyt.image_to_string(ocr_im)
         txt_data = pyt.image_to_data(ocr_im, output_type=pyt.Output.DATAFRAME)
@@ -252,8 +275,7 @@ class HFAScan(StaticPerimetry):
         ocr_im = crop[:, maxcoltrans_right[1]:]
         ocr_im = crop_to_bounding_box(ocr_im)
         ocr_im = add_boarder(ocr_im)
-        cv2.imshow('OCR Input', ocr_im.astype(np.uint8))
-        cv2.waitKey(1)
+        _display_debug_image('OCR Input', ocr_im, show_process)
 
         txt = pyt.image_to_string(ocr_im)
         txt_data = pyt.image_to_data(ocr_im, output_type=pyt.Output.DATAFRAME)
@@ -282,8 +304,7 @@ class HFAScan(StaticPerimetry):
         ocr_im = crop[:, :maxcoltrans_left[1]]
         ocr_im = crop_to_bounding_box(ocr_im)
         ocr_im = add_boarder(ocr_im)
-        cv2.imshow('OCR Input', ocr_im.astype(np.uint8))
-        cv2.waitKey(1)
+        _display_debug_image('OCR Input', ocr_im, show_process)
 
         txt = pyt.image_to_string(ocr_im)
         txt_data = pyt.image_to_data(ocr_im, output_type=pyt.Output.DATAFRAME)
@@ -310,8 +331,7 @@ class HFAScan(StaticPerimetry):
         ocr_im = crop[:, maxcoltrans_right[1]:]
         ocr_im = crop_to_bounding_box(ocr_im)
         ocr_im = add_boarder(ocr_im)
-        cv2.imshow('OCR Input', ocr_im.astype(np.uint8))
-        cv2.waitKey(1)
+        _display_debug_image('OCR Input', ocr_im, show_process)
 
         txt = pyt.image_to_string(ocr_im)
         txt_data = pyt.image_to_data(ocr_im, output_type=pyt.Output.DATAFRAME)
@@ -333,9 +353,11 @@ class HFAScan(StaticPerimetry):
         crop = self.Image[int(self.Landmarks.Top2):int(btm), :]
         crop = crop_to_bounding_box(crop)
         crop = remove_frame(crop)
+        if crop is None or crop.size == 0:
+            return
 
         # remove optional partial line at top
-        if not np.all(crop[0, :]):
+        if crop.size > 0 and not np.all(crop[0, :]):
             rowtrans = get_transitions(crop, 1)
             crop = crop[rowtrans[0][1]:, :]
 
@@ -344,18 +366,24 @@ class HFAScan(StaticPerimetry):
         # split in 4
         coltrans = get_transitions(crop[:int(crop.shape[0]/3), :], 0, True)
         largest_gaps = sorted(coltrans, key=lambda x: x[0], reverse=True)[:3]  # large whitespace
-        g1r, g2r, g3r = sorted(largest_gaps, key=lambda x: x[1])
-        coltrans = sorted(get_transitions(crop[:int(crop.shape[0] / 3), :], 0, False), key=lambda x: x[2])
-        g1l = coltrans[g1r[2] - 1]
-        g2l = coltrans[g2r[2] - 1]
-        g3l = coltrans[g3r[2] - 1]
+        if len(largest_gaps) >= 3:
+            g1r, g2r, g3r = sorted(largest_gaps, key=lambda x: x[1])
+            coltrans = sorted(get_transitions(crop[:int(crop.shape[0] / 3), :], 0, False), key=lambda x: x[2])
+            g1l = coltrans[g1r[2] - 1]
+            g2l = coltrans[g2r[2] - 1]
+            g3l = coltrans[g3r[2] - 1]
+        else:
+            w = crop.shape[1]
+            q1, q2, q3 = int(w * 0.25), int(w * 0.5), int(w * 0.75)
+            g1l, g1r = (0, q1 - 1, 0), (0, q1, 1)
+            g2l, g2r = (0, q2 - 1, 1), (0, q2, 2)
+            g3l, g3r = (0, q3 - 1, 2), (0, q3, 3)
 
         # First column
         ocr_im = crop[:, :int(g1l[1] + 1)]
         ocr_im = crop_to_bounding_box(ocr_im)
         ocr_im = add_boarder(ocr_im)
-        cv2.imshow('OCR Input', ocr_im.astype(np.uint8))
-        cv2.waitKey(1)
+        _display_debug_image('OCR Input', ocr_im, show_process)
 
         txt = pyt.image_to_string(ocr_im)
         txt_data = pyt.image_to_data(ocr_im, output_type=pyt.Output.DATAFRAME)
@@ -432,8 +460,7 @@ class HFAScan(StaticPerimetry):
         ocr_im = crop[:, int(g1r[1]):int(g2l[1] + 1)]
         ocr_im = crop_to_bounding_box(ocr_im)
         ocr_im = add_boarder(ocr_im)
-        cv2.imshow('OCR Input', ocr_im.astype(np.uint8))
-        cv2.waitKey(1)
+        _display_debug_image('OCR Input', ocr_im, show_process)
 
         txt = pyt.image_to_string(ocr_im)
         txt_data = pyt.image_to_data(ocr_im, output_type=pyt.Output.DATAFRAME)
@@ -468,8 +495,7 @@ class HFAScan(StaticPerimetry):
         ocr_im = crop[:, int(g2r[1]):int(g3l[1] + 1)]
         ocr_im = crop_to_bounding_box(ocr_im)
         ocr_im = add_boarder(ocr_im)
-        cv2.imshow('OCR Input', ocr_im.astype(np.uint8))
-        cv2.waitKey(1)
+        _display_debug_image('OCR Input', ocr_im, show_process)
 
         txt = pyt.image_to_string(ocr_im)
         txt_data = pyt.image_to_data(ocr_im, output_type=pyt.Output.DATAFRAME)
@@ -504,8 +530,7 @@ class HFAScan(StaticPerimetry):
         ocr_im = crop[:, int(g3r[1]):]
         ocr_im = crop_to_bounding_box(ocr_im)
         ocr_im = add_boarder(ocr_im)
-        cv2.imshow('OCR Input', ocr_im.astype(np.uint8))
-        cv2.waitKey(1)
+        _display_debug_image('OCR Input', ocr_im, show_process)
 
         txt = pyt.image_to_string(ocr_im)
         txt_data = pyt.image_to_data(ocr_im, output_type=pyt.Output.DATAFRAME)
@@ -536,7 +561,8 @@ class HFAScan(StaticPerimetry):
                 res.OCRDataFrame.dropna(axis=0, inplace=True)
                 self.OCRScanParameters.Age = res
 
-        cv2.destroyWindow('OCR Input')
+        if show_process:
+            cv2.destroyWindow('OCR Input')
 
     def unpack_scanparameters(self):
         if not self.OCRScanParameters:
@@ -632,8 +658,8 @@ class HFAScan(StaticPerimetry):
                 self.ScanParameters._FalsePosErrors_Unit = ''
             elif '%' in val:
                 self.ScanParameters.FalsePosErrors = int(re.search(r'\d+', val).group())
-                self.ScanParameters._FalsePosErrors_Numerator = np.NaN
-                self.ScanParameters._FalsePosErrors_Denominator = np.NaN
+                self.ScanParameters._FalsePosErrors_Numerator = np.nan
+                self.ScanParameters._FalsePosErrors_Denominator = np.nan
                 self.ScanParameters._FalsePosErrors_Unit = '%'
         except IndexError:
             print('Cannot determine False Pos Errors from {}'.format(txt))
@@ -652,8 +678,8 @@ class HFAScan(StaticPerimetry):
                 self.ScanParameters._FalseNegErrors_Unit = ''
             elif '%' in val:
                 self.ScanParameters.FalseNegErrors = int(re.search(r'\d+', val).group())
-                self.ScanParameters._FalseNegErrors_Numerator = np.NaN
-                self.ScanParameters._FalseNegErrors_Denominator = np.NaN
+                self.ScanParameters._FalseNegErrors_Numerator = np.nan
+                self.ScanParameters._FalseNegErrors_Denominator = np.nan
                 self.ScanParameters._FalseNegErrors_Unit = '%'
 
         except IndexError:
@@ -753,13 +779,13 @@ class HFAScan(StaticPerimetry):
     
     def mask_maps(self):
         if self.Protocol == '60-4':
-            self.ThresholdMap[~HFA_60_4_MASK] = np.NaN
+            self.ThresholdMap[~HFA_60_4_MASK] = np.nan
             self.ThresholdStringMap[~HFA_60_4_MASK] = ''
-            self.ThresholdConfidenceMap[~HFA_60_4_MASK] = np.NaN
+            self.ThresholdConfidenceMap[~HFA_60_4_MASK] = np.nan
 
-            self.DefectDepthMap[~HFA_60_4_MASK] = np.NaN
+            self.DefectDepthMap[~HFA_60_4_MASK] = np.nan
             self.DefectDepthStringMap[~HFA_60_4_MASK] = ''
-            self.DefectDepthConfidenceMap[~HFA_60_4_MASK] = np.NaN
+            self.DefectDepthConfidenceMap[~HFA_60_4_MASK] = np.nan
 
     def convert_maps_to_dataframes(self):
         if self.Protocol == '60-4':
@@ -790,7 +816,7 @@ class HFAScan(StaticPerimetry):
                 try:
                     res.loc[item[0], 'Confidence'] = self.OCRScanParameters.__dict__[item[0]].df_min_confidence()
                 except (IndexError, AttributeError):
-                    res.loc[item[0], 'Confidence'] = np.NaN
+                    res.loc[item[0], 'Confidence'] = np.nan
             else:
                 ind, col = item[0].lstrip('_').split('_')
                 res.loc[ind, col] = item[1]
@@ -805,10 +831,15 @@ class HFAScan(StaticPerimetry):
         if not self.isProcessed:
             raise ValueError('HFA scan should be processed before saving')
 
-        sjname = re.search(r'Dysfo\d{3}', ''.join(self.ScanParameters.Name.split())).group()
+        raw_name = str(self.ScanParameters.Name) if self.ScanParameters.Name is not None else 'UnknownSubject'
+        match = re.search(r'Dysfo\d{3}', ''.join(raw_name.split()))
+        sjname = match.group() if match else re.sub(r'[^A-Za-z0-9]+', '', raw_name) or 'UnknownSubject'
+        date_str = self.ScanParameters.Date.strftime('%Y%m%d') \
+            if isinstance(self.ScanParameters.Date, dt.date) else 'UnknownDate'
+        eye_str = self.ScanParameters.Eye if self.ScanParameters.Eye is not None else 'UnknownEye'
         testdir = os.path.join(savedir, '{}_{}_{}_OCROutput'.format(sjname,
-                                                                    self.ScanParameters.Date.strftime('%Y%m%d'),
-                                                                    self.ScanParameters.Eye))
+                                                                    date_str,
+                                                                    eye_str))
         csvdir = os.path.join(testdir, 'csvs')
         dfdir = os.path.join(testdir, 'dataframes')
         
@@ -818,85 +849,108 @@ class HFAScan(StaticPerimetry):
         os.makedirs(dfdir, exist_ok=True)
         
         # Scan Parameters
-        self.ScanParameterDf.to_pickle(os.path.join(dfdir, 
-                                                    '{}_{}'.format(sjname, 'ScanParameters.df')))
-        self.ScanParameterDf.to_csv(os.path.join(csvdir,
-                                                 '{}_{}'.format(sjname, 'ScanParameters.csv')))
+        if self.ScanParameterDf is not None:
+            self.ScanParameterDf.to_pickle(os.path.join(dfdir,
+                                                        '{}_{}'.format(sjname, 'ScanParameters.df')))
+            self.ScanParameterDf.to_csv(os.path.join(csvdir,
+                                                     '{}_{}'.format(sjname, 'ScanParameters.csv')))
 
-        # Defect depth
-        self.DefectDepthDf.to_pickle(os.path.join(dfdir,
-                                                  '{}_{}'.format(sjname, 'DefectDepth.df')))
-        self.DefectDepthDf.to_csv(os.path.join(csvdir,
-                                               '{}_{}'.format(sjname, 'DefectDepth.csv')))
-        self.DefectDepthStringDf.to_pickle(os.path.join(dfdir,
-                                                        '{}_{}'.format(sjname,
-                                                                       'DefectDepthString.df')))
-        self.DefectDepthStringDf.to_csv(os.path.join(csvdir,
-                                                     '{}_{}'.format(sjname, 'DefectDepthString.csv')))
-        self.DefectDepthConfidenceDf.to_pickle(os.path.join(dfdir,
-                                                            '{}_{}'.format(sjname,
-                                                                           'DefectDepthConfidence.df')))
-        self.DefectDepthConfidenceDf.to_csv(os.path.join(csvdir,
-                                                         '{}_{}'.format(sjname,
-                                                                        'DefectDepthConfidence.csv')))
-                
-        # Threshold Mesurements
-        self.ThresholdDf.to_pickle(os.path.join(dfdir,
-                                                '{}_{}'.format(sjname, 'Threshold.df')))
-        self.ThresholdDf.to_csv(os.path.join(csvdir,
-                                             '{}_{}'.format(sjname, 'Threshold.csv')))
-        self.ThresholdStringDf.to_pickle(os.path.join(dfdir,
-                                                      '{}_{}'.format(sjname, 'ThresholdString.df')))
-        self.ThresholdStringDf.to_csv(os.path.join(csvdir,
-                                                   '{}_{}'.format(sjname, 'ThresholdString.csv')))
-        self.ThresholdConfidenceDf.to_pickle(os.path.join(dfdir,
-                                                          '{}_{}'.format(sjname, 
-                                                                         'ThresholdConfidence.df')))
-        self.ThresholdConfidenceDf.to_csv(os.path.join(csvdir,
-                                                       '{}_{}'.format(sjname, 
-                                                                      'ThresholdConfidence.csv')))
+        dataframe_outputs = [
+            ('DefectDepth', self.DefectDepthDf),
+            ('DefectDepthString', self.DefectDepthStringDf),
+            ('DefectDepthConfidence', self.DefectDepthConfidenceDf),
+            ('Threshold', self.ThresholdDf),
+            ('ThresholdString', self.ThresholdStringDf),
+            ('ThresholdConfidence', self.ThresholdConfidenceDf),
+        ]
+
+        for label, dataframe in dataframe_outputs:
+            if dataframe is None:
+                continue
+            dataframe.to_pickle(os.path.join(dfdir, '{}_{}.df'.format(sjname, label)))
+            dataframe.to_csv(os.path.join(csvdir, '{}_{}.csv'.format(sjname, label)))
         
 
         #to excel
         writer = pd.ExcelWriter(os.path.join(testdir, '{}_OCRResult.xlsx'.format(sjname)),
                                 engine='xlsxwriter')
-        s1 = self.ScanParameterDf.style.apply(highlight_conf, subset=['Confidence'])
-        s1.to_excel(writer, sheet_name='ScanParameters')
+        if self.ScanParameterDf is not None:
+            self.ScanParameterDf.to_excel(writer, sheet_name='ScanParameters')
 
-        self.ThresholdDf.to_excel(writer, sheet_name='Threshold')
-        self.ThresholdConfidenceDf.style.apply(highlight_conf).to_excel(writer, sheet_name='ThresholdConfidence')
-        self.ThresholdStringDf.to_excel(writer, sheet_name='ThresholdString')
-        self.DefectDepthDf.to_excel(writer, sheet_name='DefectDepth')
-        self.DefectDepthConfidenceDf.style.apply(highlight_conf).to_excel(writer, sheet_name='DefectDepthConfidence')
-        self.DefectDepthStringDf.to_excel(writer, sheet_name='DefectDepthString')
+        if self.ThresholdDf is not None:
+            self.ThresholdDf.to_excel(writer, sheet_name='Threshold')
+        if self.ThresholdConfidenceDf is not None:
+            self.ThresholdConfidenceDf.to_excel(writer, sheet_name='ThresholdConfidence')
+        if self.ThresholdStringDf is not None:
+            self.ThresholdStringDf.to_excel(writer, sheet_name='ThresholdString')
+        if self.DefectDepthDf is not None:
+            self.DefectDepthDf.to_excel(writer, sheet_name='DefectDepth')
+        if self.DefectDepthConfidenceDf is not None:
+            self.DefectDepthConfidenceDf.to_excel(writer, sheet_name='DefectDepthConfidence')
+        if self.DefectDepthStringDf is not None:
+            self.DefectDepthStringDf.to_excel(writer, sheet_name='DefectDepthString')
 
-        writer.save()
         writer.close()
 
-    def process(self):
+    def process(self, show_process=False):
         self.guess_protocol()
-        self.identify_landmarks()
-        self.read_scanparameters()
-        self.unpack_scanparameters()
+        if self.Protocol is None:
+            print('Warning: could not determine protocol; using 60-4 landmarks/grid heuristics.')
+            self.Protocol = '60-4'
+        if self.Protocol in ['10-2', '24-2', '30-2']:
+            print('Warning: protocol {} is not fully supported yet; using 60-4 landmarks/grid heuristics.'
+                  .format(self.Protocol))
+            self.Protocol = '60-4'
+        self.identify_landmarks(show_process=show_process)
+        self.read_scanparameters(show_process=show_process)
+        try:
+            self.unpack_scanparameters()
+        except Exception as exc:
+            print('Warning: could not fully parse scan parameters ({}). Continuing with fallbacks.'.format(exc))
+            if self.ScanParameters.Eye is None:
+                self.ScanParameters.Eye = 'Right'
 
-        self.obtain_gridocrois()
+        self.obtain_gridocrois(show_process=show_process)
         for item in self.ThresholdRois:
-            item.recognize(self.Image, character_whitelist='0123456789<{(.,')
+            item.recognize(self.Image, character_whitelist='0123456789<{(.,', show_process=show_process)
         for item in self.DefectDepthRois:
-            item.recognize(self.Image, character_whitelist='0123456789<{(.,-')
+            item.recognize(self.Image, character_whitelist='0123456789<{(.,-', show_process=show_process)
 
-        self.ThresholdStringMap = np.array([item.Result.Text for item in self.ThresholdRois]).reshape((9, 10))
+        threshold_vals = np.array([item.Result.Text for item in self.ThresholdRois])
+        threshold_conf = np.array([item.Result.Confidence for item in self.ThresholdRois])
+        defect_vals = np.array([item.Result.Text for item in self.DefectDepthRois])
+        defect_conf = np.array([item.Result.Confidence for item in self.DefectDepthRois])
+
+        ncols = 10
+        t_rows = int(len(threshold_vals) / ncols) if len(threshold_vals) % ncols == 0 and len(threshold_vals) > 0 else 1
+        d_rows = int(len(defect_vals) / ncols) if len(defect_vals) % ncols == 0 and len(defect_vals) > 0 else 1
+
+        self.ThresholdStringMap = threshold_vals.reshape((t_rows, int(len(threshold_vals) / t_rows))) \
+            if len(threshold_vals) > 0 else np.empty((0, 0), dtype=object)
         self.ThresholdMap = unstring_maps(self.ThresholdStringMap, setbelow0to=self.__BELOW0)
-        self.ThresholdConfidenceMap = np.array([item.Result.Confidence for item in self.ThresholdRois]).reshape((9, 10))
+        self.ThresholdConfidenceMap = threshold_conf.reshape(self.ThresholdStringMap.shape) \
+            if len(threshold_conf) > 0 else np.empty((0, 0))
 
-        self.DefectDepthStringMap = np.array([item.Result.Text for item in self.DefectDepthRois]).reshape((9, 10))
+        self.DefectDepthStringMap = defect_vals.reshape((d_rows, int(len(defect_vals) / d_rows))) \
+            if len(defect_vals) > 0 else np.empty((0, 0), dtype=object)
         self.DefectDepthMap = unstring_maps(self.DefectDepthStringMap, setbelow0to=self.__BELOW0)
-        self.DefectDepthConfidenceMap = \
-            np.array([item.Result.Confidence for item in self.DefectDepthRois]).reshape((9, 10))
+        self.DefectDepthConfidenceMap = defect_conf.reshape(self.DefectDepthStringMap.shape) \
+            if len(defect_conf) > 0 else np.empty((0, 0))
 
-        self.mask_maps()
+        can_apply_60_4_mask = (
+            self.Protocol == '60-4'
+            and self.ThresholdMap.shape == HFA_60_4_MASK.shape
+            and self.DefectDepthMap.shape == HFA_60_4_MASK.shape
+        )
+
+        if can_apply_60_4_mask:
+            self.mask_maps()
         self.convert_scanparameters_to_dataframe()
-        self.convert_maps_to_dataframes()
+        if can_apply_60_4_mask:
+            self.convert_maps_to_dataframes()
+        else:
+            print('Warning: skipping map dataframe conversion for protocol {} with map shape {}.'
+                  .format(self.Protocol, self.ThresholdMap.shape))
 
         self.isProcessed = True
 
@@ -954,7 +1008,7 @@ def hfa_60_4_get_landmarks(img, show_process=True, **kwargs):
     bottom1 = min([bl.Center[1] for bl in bottomlines])
     bottom2 = max([bl.Center[1] for bl in bottomlines])
     image_center = (np.average([bl.Center[0] for bl in bottomlines] + [tl.Center[0] for tl in toplines]),
-                    (bottom1 - top2) / 2)
+                    (bottom1 + top2) / 2)
     if show_process:
         preproc.draw_lines(toplines, color=(0, 255, 0), thickness=5)
         preproc.draw_lines(bottomlines, color=(0, 255, 0), thickness=5)
@@ -1019,25 +1073,39 @@ def hfa_60_4_identify_landmarks_from_clusters(clusters, image_center=None):
 
 
 def hfa_identify_top_and_bottom_lines(linearlinesegmentarray):
-    maxhlinelength = max([line.Length for line in linearlinesegmentarray if (line.Slope is not None
-                                                                             and abs(line.Slope) < 0.5)],
-                         default=np.nan)
+    horizontal_lines = [line for line in linearlinesegmentarray if (line.Slope is not None and abs(line.Slope) < 0.5)]
+    if len(horizontal_lines) == 0:
+        return [], []
 
-    vcenter = np.average([line.Center[1] for line in linearlinesegmentarray])
+    maxhlinelength = max([line.Length for line in horizontal_lines], default=np.nan)
+    y_all = np.array([line.Center[1] for line in horizontal_lines], dtype=float)
+    y_span = max(float(np.max(y_all) - np.min(y_all)), 1.0)
 
-    toplines = []
-    bottomlines = []
-    for line in linearlinesegmentarray:
-        if line.Length < 0.9 * maxhlinelength:
+    for length_factor in (0.8, 0.6, 0.4):
+        candidates = [line for line in horizontal_lines if line.Length >= length_factor * maxhlinelength]
+        if len(candidates) < 2:
             continue
 
-        if line.Slope is not None and abs(line.Slope) < 0.5:
-            if line.Center[1] < vcenter:
-                toplines.append(line)
-            else:
-                bottomlines.append(line)
+        ordered = sorted(candidates, key=lambda line: line.Center[1])
+        y = np.array([line.Center[1] for line in ordered], dtype=float)
+        gaps = np.diff(y)
+        if len(gaps) == 0:
+            continue
 
-    return toplines, bottomlines
+        split_idx = int(np.argmax(gaps)) + 1
+        max_gap = gaps[split_idx - 1]
+        if max_gap < 0.12 * y_span:
+            continue
+
+        toplines = ordered[:split_idx]
+        bottomlines = ordered[split_idx:]
+        if len(toplines) > 0 and len(bottomlines) > 0:
+            return toplines, bottomlines
+
+    # Final fallback: median split to avoid hard failure.
+    ordered = sorted(horizontal_lines, key=lambda line: line.Center[1])
+    split_idx = max(1, int(len(ordered) / 2))
+    return ordered[:split_idx], ordered[split_idx:]
 
 
 def hfa_60_4_define_readout_grid(img, cross, show_process=True, show_zoom=True):
@@ -1201,8 +1269,9 @@ def hfa_60_4_define_readout_grid(img, cross, show_process=True, show_zoom=True):
     return colpairs, rowpairs
 
 
-def hfa_60_4_get_gridocrois(img, landmark_cross, ocroi_basename=''):
-    grows, gcols = hfa_60_4_define_readout_grid(img, landmark_cross)
+def hfa_60_4_get_gridocrois(img, landmark_cross, ocroi_basename='', show_process=False):
+    grows, gcols = hfa_60_4_define_readout_grid(img, landmark_cross, show_process=show_process,
+                                                show_zoom=show_process)
 
     grc = it.product(gcols, grows)
     rois = list(map(lambda x: ROI(x=int(x[1][0]), y=int(x[0][0]), w=int(x[1][1]-x[1][0]), h=int(x[0][1] - x[0][0])),
@@ -1231,19 +1300,18 @@ class HFAGridOCRoi(ocrutils.OCRoi):
         self.HFAParamType = 'Gridpoint'
         self.GridLoc = gridloc
 
-    def recognize(self, img, character_whitelist='0123456789<{(.,'):
+    def recognize(self, img, character_whitelist='0123456789<{(.,', show_process=False):
 
         crop = img[self.ROI.y:self.ROI.y+self.ROI.h+1,
                    self.ROI.x:self.ROI.x+self.ROI.w+1]
 
         crop_inv = cv2.bitwise_not(crop)
         # optionally remove frame
-        xsel = ~np.all(crop_inv.astype(np.bool), axis=0)
-        ysel = ~np.all(crop_inv.astype(np.bool), axis=1)
+        xsel = ~np.all(crop_inv.astype(bool), axis=0)
+        ysel = ~np.all(crop_inv.astype(bool), axis=1)
 
         crop = crop[ysel][:, xsel]
         crop_inv = crop_inv[ysel][:, xsel]
-        cv2.namedWindow('OCR Input')
         if not np.all(crop.astype(bool)):
 
             contours, _ = cv2.findContours(crop_inv, mode=cv2.RETR_EXTERNAL, method=cv2.CHAIN_APPROX_SIMPLE)
@@ -1285,8 +1353,7 @@ class HFAGridOCRoi(ocrutils.OCRoi):
             else:
                 crop_4 = crop_3_proc.copy()
 
-            cv2.imshow('OCR Input', crop_4)
-            cv2.waitKey(1)
+            _display_debug_image('OCR Input', crop_4, show_process)
 
             res1 = pyt.image_to_string(crop_4,
                                        config='--psm 6 -c tessedit_char_whitelist={}'.format(character_whitelist),
@@ -1321,9 +1388,9 @@ class HFAGridOCRoi(ocrutils.OCRoi):
 
             self.Result = OCResult(text=res1.replace('{', '<'), confidence=conf)
 
-            cv2.destroyWindow('OCR Input')
+            if show_process:
+                cv2.destroyWindow('OCR Input')
 
         else:
-            cv2.imshow('OCR Input', crop)
-            cv2.waitKey(1)
-            self.Result = OCResult(text='', confidence=np.NaN)
+            _display_debug_image('OCR Input', crop, show_process)
+            self.Result = OCResult(text='', confidence=np.nan)

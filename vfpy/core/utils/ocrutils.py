@@ -327,14 +327,14 @@ class OCRoi:
 class OCResult:
     """A baseclass for ocr results."""
 
-    def __init__(self, text=None, confidence=np.NaN):
+    def __init__(self, text=None, confidence=np.nan):
         self.Text = text
         self.Confidence = confidence
         self.OCRDataFrame = None
 
     def df_min_confidence(self):
         if self.OCRDataFrame is None:
-            return np.NaN
+            return np.nan
         else:
             return self.OCRDataFrame.loc[:, 'conf'].min()
 

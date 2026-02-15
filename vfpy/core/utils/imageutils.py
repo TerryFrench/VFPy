@@ -126,22 +126,32 @@ def crop_to_bounding_box(img, invert_for_countrous=True):
         contours, _ = cv2.findContours(cv2.bitwise_not(img), mode=cv2.RETR_EXTERNAL, method=cv2.CHAIN_APPROX_SIMPLE)
     else:
         contours, _ = cv2.findContours(img, mode=cv2.RETR_EXTERNAL, method=cv2.CHAIN_APPROX_SIMPLE)
+    if len(contours) == 0:
+        return img
     xbox, ybox, wbox, hbox = cv2.boundingRect(np.concatenate(contours))
 
     return img[ybox:ybox + hbox, xbox:xbox + wbox]
 
 
 def remove_frame(img):
+    if img is None or img.size == 0:
+        return img
     img_inv = cv2.bitwise_not(img)
+    if img_inv is None or img_inv.size == 0:
+        return img
     # optionally remove frame
-    xsel = ~np.all(img_inv.astype(np.bool), axis=0)
-    ysel = ~np.all(img_inv.astype(np.bool), axis=1)
+    xsel = ~np.all(img_inv.astype(bool), axis=0)
+    ysel = ~np.all(img_inv.astype(bool), axis=1)
+    if not np.any(xsel) or not np.any(ysel):
+        return img
 
     return img[ysel][:, xsel]
 
 
 def add_boarder(img):
-    board = np.full((int(img.shape[0] * 1.4), int(img.shape[1] * 1.4)), 255)
+    if img is None or img.size == 0 or img.shape[0] == 0 or img.shape[1] == 0:
+        return np.full((10, 10), 255, dtype=np.uint8)
+    board = np.full((int(img.shape[0] * 1.4), int(img.shape[1] * 1.4)), 255, dtype=img.dtype)
     offsety = int(img.shape[0] * 0.2)
     offsetx = int((img.shape[1] * 0.2))
     board[offsety:offsety + img.shape[0], offsetx:offsetx + img.shape[1]] = img

@@ -1,7 +1,11 @@
 import operator
-import tkinter as tk
 import os
 import numpy as np
+
+try:
+    import tkinter as tk
+except Exception:  # pragma: no cover - runtime environment specific
+    tk = None
 
 
 def get_screen_resolution():
@@ -11,11 +15,16 @@ def get_screen_resolution():
         tuple: (screenheight, screenwidth)
     """
 
-    root = tk.Tk()
-    width = root.winfo_screenwidth()
-    height = root.winfo_screenheight()
+    if tk is None:
+        return 1080, 1920
 
-    del root
+    try:
+        root = tk.Tk()
+        width = root.winfo_screenwidth()
+        height = root.winfo_screenheight()
+        root.destroy()
+    except Exception:
+        return 1080, 1920
 
     return height, width
 
@@ -43,9 +52,9 @@ class LinearLineSegment:
         self.Point2 = (x2, y2)
         self.Center = ((x1 + x2)/2, (y1 + y2)/2)
 
-        self.A = np.subtract(y1, y2, dtype=np.float)
-        self.B = np.subtract(x2, x1, dtype=np.float)
-        self.C = -np.subtract((x1 * y2), (x2 * y1), dtype=np.float)
+        self.A = np.subtract(y1, y2, dtype=float)
+        self.B = np.subtract(x2, x1, dtype=float)
+        self.C = -np.subtract((x1 * y2), (x2 * y1), dtype=float)
 
         self.Length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
 
